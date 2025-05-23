@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import os
+import queue
 import sys
 import argparse
 import logging
@@ -92,21 +93,40 @@ async def websocket_tts(websocket: WebSocket):
             prompt_speech_16k = load_wav(f, 16000)
             logging.info("音色载入成功")
 
-        while True:
-            data = await websocket.receive_json()
-            tts_text = data.get("tts_text")
-            if tts_text is None or tts_text == "__end__":
-                break
-            logging.info("tts_text: %s", tts_text)
-            # 用列表传递单句文本
-            for i, j in enumerate(cosyvoice.inference_zero_shot(
-                    [tts_text],
-                    "希望你以后能够做的比我还好呦。",
-                    prompt_speech_16k,
-                    stream=True)):
-                tts_audio = (j['tts_speech'].numpy() * (2 ** 15)).astype(np.int16).tobytes()
-                await websocket.send_bytes(tts_audio)
-                logging.info("开始发送音频数据")
+        # 用线程安全队列做同步桥梁
+        text_queue = queue.Queue()
+
+        # 启动异步任务接收前端文本
+        async def receive_texts():
+            while True:
+                data = await websocket.receive_json()
+                tts_text = data.get("tts_text")
+                if tts_text is None or tts_text == "__end__":
+                    text_queue.put(None)  # 结束标志
+                    break
+                logging.info("tts_text: %s", tts_text)
+                text_queue.put(tts_text)
+
+        import asyncio
+        asyncio.create_task(receive_texts())
+
+        # 同步生成器，供模型消费
+        def text_generator():
+            while True:
+                t = text_queue.get()
+                if t is None:
+                    break
+                yield t
+
+        # 直接用生成器传给模型，模型会边取边播
+        for i, j in enumerate(cosyvoice.inference_zero_shot(
+                text_generator(),
+                "希望你以后能够做的比我还好呦。",
+                prompt_speech_16k,
+                stream=True)):
+            tts_audio = (j['tts_speech'].numpy() * (2 ** 15)).astype(np.int16).tobytes()
+            await websocket.send_bytes(tts_audio)
+            logging.info("开始发送音频数据")
     except WebSocketDisconnect:
         await websocket.close()
     except Exception as e:
