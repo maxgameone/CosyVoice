@@ -16,7 +16,7 @@ import sys
 import argparse
 import logging
 logging.getLogger('matplotlib').setLevel(logging.WARNING)
-from fastapi import FastAPI, UploadFile, Form, File
+from fastapi import FastAPI, UploadFile, Form, File, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
@@ -26,8 +26,10 @@ sys.path.append('{}/../../..'.format(ROOT_DIR))
 sys.path.append('{}/../../../third_party/Matcha-TTS'.format(ROOT_DIR))
 from cosyvoice.cli.cosyvoice import CosyVoice, CosyVoice2
 from cosyvoice.utils.file_utils import load_wav
+import uuid
 
 app = FastAPI()
+
 # set cross region allowance
 app.add_middleware(
     CORSMiddleware,
@@ -35,7 +37,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"])
-
+user_sessions = {}
 
 def generate_data(model_output):
     for i in model_output:
@@ -80,7 +82,38 @@ async def inference_instruct2(tts_text: str = Form(), instruct_text: str = Form(
     model_output = cosyvoice.inference_instruct2(tts_text, instruct_text, prompt_speech_16k)
     return StreamingResponse(generate_data(model_output))
 
+@app.websocket("/ws_tts")
+async def websocket_tts(websocket: WebSocket):
+    await websocket.accept()
+    try:
+        # 1. 定义异步生成器，动态收集前端发来的 tts_text
+        async def text_generator():
+            while True:
+                data = await websocket.receive_json()
+                tts_text = data.get("tts_text")
+                if tts_text is None or tts_text == "__end__":
+                    break
+                yield tts_text
 
+        # 2. 获取一次参数（如 spk_id），然后用生成器传给模型
+        data = await websocket.receive_json()
+        prompt_text = data.get("prompt_text", "中文女")
+        prompt_wav = data.get("prompt_wav", None)
+        if prompt_wav is not None:
+            prompt_speech_16k = load_wav(prompt_wav, 16000)
+        else:
+            prompt_speech_16k = None
+
+        # 3. 传递生成器给模型，流式返回音频
+        for i in enumerate(cosyvoice.inference_zero_shot(text_generator(),prompt_text, prompt_speech_16k)):
+            websocket.send_bytes(generate_data(i))
+    
+        # 其它模式可扩展
+    except WebSocketDisconnect:
+        await websocket.close()
+    except Exception as e:
+        await websocket.send_json({"error": str(e)})
+      
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--port',
