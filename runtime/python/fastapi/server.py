@@ -107,7 +107,7 @@ async def websocket_tts(websocket: WebSocket):
                 print("开始发送音频数据")
     except WebSocketDisconnect:
         await websocket.close()
-    except Exception as e:
+    except Exception as e: 
         await websocket.send_json({"error": str(e)})
       
 if __name__ == '__main__':
