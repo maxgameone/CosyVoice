@@ -27,7 +27,8 @@ sys.path.append('{}/../../../third_party/Matcha-TTS'.format(ROOT_DIR))
 from cosyvoice.cli.cosyvoice import CosyVoice, CosyVoice2
 from cosyvoice.utils.file_utils import load_wav
 import uuid
-
+import logging
+logging.basicConfig(level=logging.INFO)
 app = FastAPI()
 
 # set cross region allowance
@@ -89,12 +90,12 @@ async def websocket_tts(websocket: WebSocket):
         prompt_wav_path = os.path.join(ROOT_DIR, "./zero_shot_prompt.wav")
         with open(prompt_wav_path, "rb") as f:
             prompt_speech_16k = load_wav(f, 16000)
-            print("音色载入成功")
+            logging.info("音色载入成功")
 
         while True:
             data = await websocket.receive_json()
             tts_text = data.get("tts_text")
-            print("tts_text:", tts_text)
+            logging.info("tts_text:", tts_text)
             if tts_text is None or tts_text == "__end__":
                 break
             for i, j in enumerate(cosyvoice.inference_zero_shot(
@@ -104,10 +105,10 @@ async def websocket_tts(websocket: WebSocket):
                     stream=True)):
                 tts_audio = (j['tts_speech'].numpy() * (2 ** 15)).astype(np.int16).tobytes()
                 await websocket.send_bytes(tts_audio)
-                print("开始发送音频数据")
+                logging.info("开始发送音频数据")
     except WebSocketDisconnect:
         await websocket.close()
-    except Exception as e: 
+    except Exception as e:
         await websocket.send_json({"error": str(e)})
       
 if __name__ == '__main__':
