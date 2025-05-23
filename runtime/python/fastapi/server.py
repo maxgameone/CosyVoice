@@ -87,19 +87,23 @@ async def inference_instruct2(tts_text: str = Form(), instruct_text: str = Form(
 async def websocket_tts(websocket: WebSocket):
     await websocket.accept()
     try:
-        prompt_wav_path = os.path.join(ROOT_DIR, "./zero_shot_prompt.wav")
+        prompt_wav_path = os.path.join(ROOT_DIR, "zero_shot_prompt.wav")
         with open(prompt_wav_path, "rb") as f:
             prompt_speech_16k = load_wav(f, 16000)
             logging.info("音色载入成功")
-
-        while True:
-            data = await websocket.receive_json()
-            tts_text = data.get("tts_text")
-            logging.info("tts_text:", tts_text)
-            if tts_text is None or tts_text == "__end__":
-                break
-            for i, j in enumerate(cosyvoice.inference_zero_shot(
-                    [tts_text],
+        async def text_generator():
+            while True:
+                data = await websocket.receive_json()
+                tts_text = data.get("tts_text")
+                if tts_text is None or tts_text == "__end__":
+                    break
+                logging.info("tts_text:", tts_text)
+                yield tts_text
+               
+                
+        
+        for i, j in enumerate(cosyvoice.inference_zero_shot(
+                    text_generator,
                     "希望你以后能够做的比我还好呦。",
                     prompt_speech_16k,
                     stream=True)):
