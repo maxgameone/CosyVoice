@@ -86,29 +86,25 @@ async def inference_instruct2(tts_text: str = Form(), instruct_text: str = Form(
 async def websocket_tts(websocket: WebSocket):
     await websocket.accept()
     try:
-        # 1. 定义异步生成器，动态收集前端发来的 tts_text
-        async def text_generator():
-            while True:
-                data = await websocket.receive_json()
-                tts_text = data.get("tts_text")
-                print("tts_text:", tts_text)
-                if tts_text is None or tts_text == "__end__":
-                    break
-                yield tts_text
-
-        # 2. 获取一次参数（如 spk_id），然后用生成器传给模型
         prompt_wav_path = os.path.join(ROOT_DIR, "./zero_shot_prompt.wav")
- 
-
         with open(prompt_wav_path, "rb") as f:
             prompt_speech_16k = load_wav(f, 16000)
             print("音色载入成功")
-        # 3. 传递生成器给模型，流式返回音频
-        for i in enumerate(cosyvoice.inference_zero_shot(text_generator(),"中文女", prompt_speech_16k)):
-            websocket.send_bytes(generate_data(i))
-            print("开始发送音频数据")
-    
-        # 其它模式可扩展
+
+        while True:
+            data = await websocket.receive_json()
+            tts_text = data.get("tts_text")
+            print("tts_text:", tts_text)
+            if tts_text is None or tts_text == "__end__":
+                break
+            for i, j in enumerate(cosyvoice.inference_zero_shot(
+                    [tts_text],
+                    "希望你以后能够做的比我还好呦。",
+                    prompt_speech_16k,
+                    stream=True)):
+                tts_audio = (j['tts_speech'].numpy() * (2 ** 15)).astype(np.int16).tobytes()
+                await websocket.send_bytes(tts_audio)
+                print("开始发送音频数据")
     except WebSocketDisconnect:
         await websocket.close()
     except Exception as e:
