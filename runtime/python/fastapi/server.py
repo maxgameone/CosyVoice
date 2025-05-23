@@ -100,10 +100,10 @@ async def websocket_tts(websocket: WebSocket):
                 logging.info("tts_text:", tts_text)
                 yield tts_text
                
-                
+            
         
         for i, j in enumerate(cosyvoice.inference_zero_shot(
-                    text_generator,
+                    text_generator(),
                     "希望你以后能够做的比我还好呦。",
                     prompt_speech_16k,
                     stream=True)):
