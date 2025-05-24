@@ -9,8 +9,9 @@ from fastapi import FastAPI, UploadFile, Form, File, WebSocket, WebSocketDisconn
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
-from cosyvoice.utils.file_utils import load_wav
 from cosyvoice.cli.cosyvoice import CosyVoice, CosyVoice2
+from cosyvoice.utils.file_utils import load_wav
+
 
 logging.basicConfig(level=logging.INFO)
 app = FastAPI()
