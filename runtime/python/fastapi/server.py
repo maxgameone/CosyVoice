@@ -48,42 +48,42 @@ def generate_data(model_output):
         yield tts_audio
 
 
-@app.get("/inference_sft")
-@app.post("/inference_sft")
-async def inference_sft(tts_text: str = Form(), spk_id: str = Form()):
-    model_output = cosyvoice.inference_sft(tts_text, spk_id)
-    return StreamingResponse(generate_data(model_output))
+# @app.get("/inference_sft")
+# @app.post("/inference_sft")
+# async def inference_sft(tts_text: str = Form(), spk_id: str = Form()):
+#     model_output = cosyvoice.inference_sft(tts_text, spk_id)
+#     return StreamingResponse(generate_data(model_output))
 
 
-@app.get("/inference_zero_shot")
-@app.post("/inference_zero_shot")
-async def inference_zero_shot(tts_text: str = Form(), prompt_text: str = Form(), prompt_wav: UploadFile = File()):
-    prompt_speech_16k = load_wav(prompt_wav.file, 16000)
-    model_output = cosyvoice.inference_zero_shot(tts_text, prompt_text, prompt_speech_16k)
-    return StreamingResponse(generate_data(model_output))
+# @app.get("/inference_zero_shot")
+# @app.post("/inference_zero_shot")
+# async def inference_zero_shot(tts_text: str = Form(), prompt_text: str = Form(), prompt_wav: UploadFile = File()):
+#     prompt_speech_16k = load_wav(prompt_wav.file, 16000)
+#     model_output = cosyvoice.inference_zero_shot(tts_text, prompt_text, prompt_speech_16k)
+#     return StreamingResponse(generate_data(model_output))
 
 
-@app.get("/inference_cross_lingual")
-@app.post("/inference_cross_lingual")
-async def inference_cross_lingual(tts_text: str = Form(), prompt_wav: UploadFile = File()):
-    prompt_speech_16k = load_wav(prompt_wav.file, 16000)
-    model_output = cosyvoice.inference_cross_lingual(tts_text, prompt_speech_16k)
-    return StreamingResponse(generate_data(model_output))
+# @app.get("/inference_cross_lingual")
+# @app.post("/inference_cross_lingual")
+# async def inference_cross_lingual(tts_text: str = Form(), prompt_wav: UploadFile = File()):
+#     prompt_speech_16k = load_wav(prompt_wav.file, 16000)
+#     model_output = cosyvoice.inference_cross_lingual(tts_text, prompt_speech_16k)
+#     return StreamingResponse(generate_data(model_output))
 
 
-@app.get("/inference_instruct")
-@app.post("/inference_instruct")
-async def inference_instruct(tts_text: str = Form(), spk_id: str = Form(), instruct_text: str = Form()):
-    model_output = cosyvoice.inference_instruct(tts_text, spk_id, instruct_text)
-    return StreamingResponse(generate_data(model_output))
+# @app.get("/inference_instruct")
+# @app.post("/inference_instruct")
+# async def inference_instruct(tts_text: str = Form(), spk_id: str = Form(), instruct_text: str = Form()):
+#     model_output = cosyvoice.inference_instruct(tts_text, spk_id, instruct_text)
+#     return StreamingResponse(generate_data(model_output))
 
 
-@app.get("/inference_instruct2")
-@app.post("/inference_instruct2")
-async def inference_instruct2(tts_text: str = Form(), instruct_text: str = Form(), prompt_wav: UploadFile = File()):
-    prompt_speech_16k = load_wav(prompt_wav.file, 16000)
-    model_output = cosyvoice.inference_instruct2(tts_text, instruct_text, prompt_speech_16k)
-    return StreamingResponse(generate_data(model_output))
+# @app.get("/inference_instruct2")
+# @app.post("/inference_instruct2")
+# async def inference_instruct2(tts_text: str = Form(), instruct_text: str = Form(), prompt_wav: UploadFile = File()):
+#     prompt_speech_16k = load_wav(prompt_wav.file, 16000)
+#     model_output = cosyvoice.inference_instruct2(tts_text, instruct_text, prompt_speech_16k)
+#     return StreamingResponse(generate_data(model_output))
 
 import asyncio
 import concurrent.futures
@@ -107,7 +107,6 @@ async def websocket_tts(websocket: WebSocket):
         with open(prompt_wav_path, "rb") as f:
             prompt_speech_16k = load_wav(f, 16000)
             logging.info("ws_tts: 音色载入成功")
-
 
         text_queue = queue.Queue()
 
@@ -137,15 +136,22 @@ async def websocket_tts(websocket: WebSocket):
 
         def run_inference():
             logging.info("ws_tts: 开始推理循环")
+            encoder = opuslib.Encoder(16000, 1, opuslib.APPLICATION_AUDIO)
+            frame_size = 320  # 20ms帧，16kHz采样率，单声道
             for i, j in enumerate(local_cosyvoice.inference_zero_shot(
                     text_generator(),
                     "希望你以后能够做的比我还好呦。",
                     prompt_speech_16k,
                     stream=True)):
                 pcm_data = (j['tts_speech'].numpy() * (2 ** 15)).astype(np.int16).tobytes()
-                encoder = opuslib.Encoder(16000, 1, opuslib.APPLICATION_AUDIO)
-                opus_data = encoder.encode(pcm_data)
-                yield i, opus_data
+                # 分帧编码
+                for start in range(0, len(pcm_data), frame_size * 2):  # 2字节每采样点
+                    frame = pcm_data[start:start + frame_size * 2]
+                    if len(frame) < frame_size * 2:
+                        # 填充最后一帧
+                        frame += b'\x00' * (frame_size * 2 - len(frame))
+                    opus_data = encoder.encode(frame, frame_size)
+                    yield i, opus_data
             logging.info("ws_tts: 推理循环结束")
 
         loop = asyncio.get_running_loop()
@@ -171,11 +177,11 @@ if __name__ == '__main__':
                         default='iic/CosyVoice-300M',
                         help='local path or modelscope repo id')
     args = parser.parse_args()
-    try:
-        cosyvoice = CosyVoice(args.model_dir)
-    except Exception:
-        try:
-            cosyvoice = CosyVoice2(args.model_dir)
-        except Exception:
-            raise TypeError('no valid model_type!')
+    # try:
+    #     cosyvoice = CosyVoice(args.model_dir)
+    # except Exception:
+    #     try:
+    #         cosyvoice = CosyVoice2(args.model_dir)
+    #     except Exception:
+    #         raise TypeError('no valid model_type!')
     uvicorn.run(app, host="0.0.0.0", port=args.port)
