@@ -118,12 +118,14 @@ async def websocket_tts(websocket: WebSocket):
 
         # 用线程跑模型推理和音频发送
         def tts_worker():
+            logging.log("推理线程已启动")
             try:
                 for i, j in enumerate(cosyvoice.inference_zero_shot(
                         text_generator(),
                         "希望你以后能够做的比我还好呦。",
                         prompt_speech_16k,
                         stream=False)):
+                    
                     tts_audio = (j['tts_speech'].numpy() * (2 ** 15)).astype(np.int16).tobytes()
                     # 线程中不能直接 await，需要用 asyncio.run_coroutine_threadsafe
                     fut = asyncio.run_coroutine_threadsafe(
@@ -131,7 +133,7 @@ async def websocket_tts(websocket: WebSocket):
                         asyncio.get_event_loop()
                     )
                     fut.result()
-                    logging.info("开始发送音频数据")
+                    logging.info("已发送音频数据:",i)
             except Exception as e:
                 logging.error(f"TTS worker error: {e}")
 
