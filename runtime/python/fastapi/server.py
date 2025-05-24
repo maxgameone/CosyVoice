@@ -16,7 +16,7 @@ import queue
 import sys
 import argparse
 import logging
-import pyogg
+import opuslib
 logging.getLogger('matplotlib').setLevel(logging.WARNING)
 from fastapi import FastAPI, UploadFile, Form, File, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
@@ -107,12 +107,7 @@ async def websocket_tts(websocket: WebSocket):
         with open(prompt_wav_path, "rb") as f:
             prompt_speech_16k = load_wav(f, 16000)
             logging.info("ws_tts: 音色载入成功")
-       
-        # 初始化 Opus 编码器（16kHz, 单声道）
-        opus_encoder = pyogg.OpusEncoder()
-        opus_encoder.set_application("audio")
-        opus_encoder.set_sampling_frequency(16000)
-        opus_encoder.set_channels(1)
+
 
         text_queue = queue.Queue()
 
@@ -148,7 +143,8 @@ async def websocket_tts(websocket: WebSocket):
                     prompt_speech_16k,
                     stream=True)):
                 pcm_data = (j['tts_speech'].numpy() * (2 ** 15)).astype(np.int16).tobytes()
-                opus_data = opus_encoder.encode(pcm_data)
+                encoder = opuslib.Encoder(16000, 1, opuslib.APPLICATION_AUDIO)
+                opus_data = encoder.encode(pcm_data)
                 yield i, opus_data
             logging.info("ws_tts: 推理循环结束")
 
