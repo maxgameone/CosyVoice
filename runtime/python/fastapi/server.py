@@ -151,13 +151,18 @@ async def websocket_tts(websocket: WebSocket):
                         # 填充最后一帧
                         frame += b'\x00' * (frame_size * 2 - len(frame))
                     opus_data = encoder.encode(frame, frame_size)
+                    logging.info(f"ws_tts: 编码音频数据长度: {len(opus_data)}")
                     yield i, opus_data
             logging.info("ws_tts: 推理循环结束")
 
         loop = asyncio.get_running_loop()
         with concurrent.futures.ThreadPoolExecutor() as pool:
-            # 在后台线程运行推理和同步生成器
-            for i, opus_data in await loop.run_in_executor(pool, lambda: list(run_inference())):
+            gen = run_inference()
+            while True:
+                result = await loop.run_in_executor(pool, lambda: next(gen, None))
+                if result is None:
+                    break
+                i, opus_data = result
                 await websocket.send_bytes(opus_data)
                 logging.info(f"ws_tts: 已发送音频数据 {i}")
 
