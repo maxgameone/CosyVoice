@@ -105,11 +105,12 @@ async def websocket_tts(websocket: WebSocket):
                 while not stop_event.is_set():
                     data = await websocket.receive_json()
                     tts_text = data.get("tts_text")
+                    logging.info(f"收到前端文本: {tts_text}")
                     if tts_text is None or tts_text == "__end__":
                         text_queue.put(None)
                         break
-                    logging.info("tts_text: %s", tts_text)
                     text_queue.put(tts_text)
+                    logging.info("文本已放入队列")
             except Exception as e:
                 logging.warning(f"receive_texts异常: {e}")
                 text_queue.put(None)
@@ -118,6 +119,7 @@ async def websocket_tts(websocket: WebSocket):
 
         def text_generator():
             while not stop_event.is_set():
+                logging.info("等待从队列取文本")
                 t = text_queue.get()
                 logging.info(f"生成器取到文本: {t}")
                 if t is None:
@@ -157,7 +159,7 @@ async def websocket_tts(websocket: WebSocket):
         stop_event.set()
         text_queue.put(None)
         tts_thread.join(timeout=2)
-
+        logging.info("程序运行完毕")
     except WebSocketDisconnect:
         logging.info("WebSocket 连接已断开")
         await websocket.close()
