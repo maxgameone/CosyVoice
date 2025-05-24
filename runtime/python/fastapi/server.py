@@ -86,6 +86,7 @@ async def inference_instruct2(tts_text: str = Form(), instruct_text: str = Form(
     model_output = cosyvoice.inference_instruct2(tts_text, instruct_text, prompt_speech_16k)
     return StreamingResponse(generate_data(model_output))
 
+
 @app.websocket("/ws_tts")
 async def websocket_tts(websocket: WebSocket):
     await websocket.accept()
@@ -96,6 +97,7 @@ async def websocket_tts(websocket: WebSocket):
             logging.info("音色载入成功")
 
         text_queue = queue.Queue()
+        loop = asyncio.get_running_loop()  # 获取主线程事件循环
 
         async def receive_texts():
             while True:
@@ -112,11 +114,11 @@ async def websocket_tts(websocket: WebSocket):
         def text_generator():
             while True:
                 t = text_queue.get()
+                logging.info(f"生成器取到文本: {t}")
                 if t is None:
                     break
                 yield t
 
-        # 用线程跑模型推理和音频发送
         def tts_worker():
             logging.info("推理线程已启动")
             try:
@@ -125,23 +127,20 @@ async def websocket_tts(websocket: WebSocket):
                         "希望你以后能够做的比我还好呦。",
                         prompt_speech_16k,
                         stream=True)):
-
                     tts_audio = (j['tts_speech'].numpy() * (2 ** 15)).astype(np.int16).tobytes()
                     logging.info("解析完毕")
-                    # 线程中不能直接 await，需要用 asyncio.run_coroutine_threadsafe
                     fut = asyncio.run_coroutine_threadsafe(
-                       
                         websocket.send_bytes(tts_audio),
-                        asyncio.get_event_loop()
+                        loop  # 用主线程事件循环
                     )
                     fut.result()
-                    logging.info("已发送音频数据:",i)
+                    logging.info("已发送音频数据: %s", i)
             except Exception as e:
                 logging.error(f"TTS worker error: {e}")
 
         threading.Thread(target=tts_worker, daemon=True).start()
 
-        # 等待 receive_texts 结束
+        # 保持连接直到客户端断开
         while True:
             await asyncio.sleep(0.1)
             if not websocket.client_state.name == "CONNECTED":
@@ -151,7 +150,6 @@ async def websocket_tts(websocket: WebSocket):
         await websocket.close()
     except Exception as e:
         await websocket.send_json({"error": str(e)})
-      
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--port',
