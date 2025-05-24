@@ -124,12 +124,13 @@ async def websocket_tts(websocket: WebSocket):
                         text_generator(),
                         "希望你以后能够做的比我还好呦。",
                         prompt_speech_16k,
-                        stream=False)):
-                    
+                        stream=True)):
+
                     tts_audio = (j['tts_speech'].numpy() * (2 ** 15)).astype(np.int16).tobytes()
+                    logging.info("解析完毕")
                     # 线程中不能直接 await，需要用 asyncio.run_coroutine_threadsafe
                     fut = asyncio.run_coroutine_threadsafe(
-                        logging.info("正在发送音频数据: %s", i),
+                       
                         websocket.send_bytes(tts_audio),
                         asyncio.get_event_loop()
                     )
