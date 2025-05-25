@@ -175,6 +175,25 @@ if __name__ == '__main__':
     parser.add_argument('--model_dir', type=str, default='iic/CosyVoice-300M')
     parser.add_argument('--worker_num', type=int, default=5)
     args = parser.parse_args()
+        # 先在主进程下载模型，避免多进程重复下载
+    try:
+     logging.info(f"[Main] 正在预下载模型到 {args.model_dir} ...")
+     try:
+         model = CosyVoice(args.model_dir)
+     except Exception:
+         model = CosyVoice2(args.model_dir)
+     del model
+     import gc
+     gc.collect()
+     try:
+        import torch
+        torch.cuda.empty_cache()
+     except Exception:
+        pass
+     logging.info(f"[Main] 模型预下载完成")
+    except Exception as e:
+     logging.error(f"[Main] 模型预下载失败: {e}")
+     exit(1)
     start_workers(args.model_dir, args.worker_num)
     logging.info(f"[Main] 启动服务，模型目录: {args.model_dir}, worker数: {args.worker_num}")
     logging.info(f"[Main] 服务启动，监听端口 {args.port}")
