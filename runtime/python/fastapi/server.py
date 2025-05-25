@@ -11,6 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
+import multiprocessing
 import os
 import queue
 import sys
@@ -48,145 +50,103 @@ def generate_data(model_output):
         yield tts_audio
 
 
-# @app.get("/inference_sft")
-# @app.post("/inference_sft")
-# async def inference_sft(tts_text: str = Form(), spk_id: str = Form()):
-#     model_output = cosyvoice.inference_sft(tts_text, spk_id)
-#     return StreamingResponse(generate_data(model_output))
+# TTS worker 进程函数，每个进程独立加载模型和 Opus 编码器
+def tts_worker(model_dir, task_queue, result_queue):
+    logging.info(f"[Worker {os.getpid()}] 启动，加载模型中...")
+    model = CosyVoice(model_dir)
+    encoder = opuslib.Encoder(16000, 1, opuslib.APPLICATION_AUDIO)
+    frame_size = 320  # 20ms帧
+    logging.info(f"[Worker {os.getpid()}] 模型加载完成，等待任务")
+    while True:
+        task = task_queue.get()
+        if task is None:  # 收到退出信号
+            logging.info(f"[Worker {os.getpid()}] 收到退出信号，退出")
+            break
+        tts_text, prompt_text, prompt_speech_16k = task
+        logging.info(f"[Worker {os.getpid()}] 收到任务: {tts_text}")
+        # 逐句推理并分帧编码
+        for j in model.inference_zero_shot(tts_text, prompt_text, prompt_speech_16k, stream=True):
+            pcm = (j['tts_speech'].numpy() * (2 ** 15)).astype(np.int16).tobytes()
+            for start in range(0, len(pcm), frame_size * 2):
+                frame = pcm[start:start + frame_size * 2]
+                if len(frame) < frame_size * 2:
+                    frame += b'\x00' * (frame_size * 2 - len(frame))
+                opus_data = encoder.encode(frame, frame_size)
+                result_queue.put(opus_data)
+        result_queue.put(None)  # 一段文本结束信号
+        logging.info(f"[Worker {os.getpid()}] 任务完成")
 
+# 启动进程池
+NUM_WORKERS = 2
+task_queues, result_queues, workers = [], [], []
+def start_workers(model_dir):
+    """启动多个 TTS worker 进程，每个进程有独立的任务队列和结果队列"""
+    for idx in range(NUM_WORKERS):
+        tq, rq = multiprocessing.Queue(), multiprocessing.Queue()
+        p = multiprocessing.Process(target=tts_worker, args=(model_dir, tq, rq))
+        p.start()
+        task_queues.append(tq)
+        result_queues.append(rq)
+        workers.append(p)
+        logging.info(f"[Main] 启动worker进程 {p.pid}")
 
-# @app.get("/inference_zero_shot")
-# @app.post("/inference_zero_shot")
-# async def inference_zero_shot(tts_text: str = Form(), prompt_text: str = Form(), prompt_wav: UploadFile = File()):
-#     prompt_speech_16k = load_wav(prompt_wav.file, 16000)
-#     model_output = cosyvoice.inference_zero_shot(tts_text, prompt_text, prompt_speech_16k)
-#     return StreamingResponse(generate_data(model_output))
-
-
-# @app.get("/inference_cross_lingual")
-# @app.post("/inference_cross_lingual")
-# async def inference_cross_lingual(tts_text: str = Form(), prompt_wav: UploadFile = File()):
-#     prompt_speech_16k = load_wav(prompt_wav.file, 16000)
-#     model_output = cosyvoice.inference_cross_lingual(tts_text, prompt_speech_16k)
-#     return StreamingResponse(generate_data(model_output))
-
-
-# @app.get("/inference_instruct")
-# @app.post("/inference_instruct")
-# async def inference_instruct(tts_text: str = Form(), spk_id: str = Form(), instruct_text: str = Form()):
-#     model_output = cosyvoice.inference_instruct(tts_text, spk_id, instruct_text)
-#     return StreamingResponse(generate_data(model_output))
-
-
-# @app.get("/inference_instruct2")
-# @app.post("/inference_instruct2")
-# async def inference_instruct2(tts_text: str = Form(), instruct_text: str = Form(), prompt_wav: UploadFile = File()):
-#     prompt_speech_16k = load_wav(prompt_wav.file, 16000)
-#     model_output = cosyvoice.inference_instruct2(tts_text, instruct_text, prompt_speech_16k)
-#     return StreamingResponse(generate_data(model_output))
-
-import asyncio
-import concurrent.futures
-# ...existing code...
+def get_worker():
+    """简单轮询分配空闲 worker"""
+    for tq, rq in zip(task_queues, result_queues):
+        if rq.empty():
+            return tq, rq
+    return task_queues[0], result_queues[0]
 
 @app.websocket("/ws_tts")
 async def websocket_tts(websocket: WebSocket):
+    """WebSocket TTS 推理接口，接收文本，返回 Opus 音频流"""
     await websocket.accept()
-    logging.info("ws_tts: 连接已建立")
+    logging.info("[Main] 新WebSocket连接")
     try:
-        # 每次连接都新建模型实例
-        try:
-            local_cosyvoice = CosyVoice(args.model_dir)
-            logging.info("ws_tts: CosyVoice实例加载成功")
-        except Exception:
-            local_cosyvoice = CosyVoice2(args.model_dir)
-            logging.info("ws_tts: CosyVoice2实例加载成功")
-        logging.info("ws_tts: 本连接模型实例已加载")
-
+        # 载入提示音色
         prompt_wav_path = os.path.join(ROOT_DIR, "zero_shot_prompt.wav")
         with open(prompt_wav_path, "rb") as f:
             prompt_speech_16k = load_wav(f, 16000)
-            logging.info("ws_tts: 音色载入成功")
-
-        text_queue = queue.Queue()
-
-        async def receive_texts():
+        while True:
+            data = await websocket.receive_json()
+            tts_text = data.get("tts_text")
+            logging.info(f"[Main] 收到文本: {tts_text}")
+            if not tts_text or tts_text == "__end__":
+                break
+            tq, rq = get_worker()
+            # 发送任务到 worker
+            tq.put((tts_text, "希望你以后能够做的比我还好呦。", prompt_speech_16k))
+            # 实时读取 worker 返回的音频帧并发送给前端
+            frame_count = 0
             while True:
-                data = await websocket.receive_json()
-                tts_text = data.get("tts_text")
-                logging.info(f"ws_tts: 收到文本: {tts_text}")
-                if tts_text is None or tts_text == "__end__":
-                    text_queue.put(None)
-                    logging.info("ws_tts: 收到结束信号，退出文本接收")
+                opus_data = await asyncio.get_event_loop().run_in_executor(None, rq.get)
+                if opus_data is None:
                     break
-                text_queue.put(tts_text)
-                logging.info("ws_tts: 文本已放入队列")
-
-        # 启动异步接收任务
-        receive_task = asyncio.create_task(receive_texts())
-
-        def text_generator():
-            while True:
-                t = text_queue.get()
-                logging.info(f"ws_tts: 生成器取到文本: {t}")
-                if t is None:
-                    logging.info("ws_tts: 生成器收到结束信号，退出")
-                    break
-                yield t
-
-        def run_inference():
-            logging.info("ws_tts: 开始推理循环")
-            encoder = opuslib.Encoder(16000, 1, opuslib.APPLICATION_AUDIO)
-            frame_size = 320  # 20ms帧，16kHz采样率，单声道
-            for i, j in enumerate(local_cosyvoice.inference_zero_shot(
-                    text_generator(),
-                    "希望你以后能够做的比我还好呦。",
-                    prompt_speech_16k,
-                    stream=True)):
-                pcm_data = (j['tts_speech'].numpy() * (2 ** 15)).astype(np.int16).tobytes()
-                # 分帧编码
-                for start in range(0, len(pcm_data), frame_size * 2):  # 2字节每采样点
-                    frame = pcm_data[start:start + frame_size * 2]
-                    if len(frame) < frame_size * 2:
-                        # 填充最后一帧
-                        frame += b'\x00' * (frame_size * 2 - len(frame))
-                    opus_data = encoder.encode(frame, frame_size)
-                    logging.info(f"ws_tts: 编码音频数据长度: {len(opus_data)}")
-                    yield i, opus_data
-            logging.info("ws_tts: 推理循环结束")
-
-        loop = asyncio.get_running_loop()
-        with concurrent.futures.ThreadPoolExecutor() as pool:
-            gen = run_inference()
-            while True:
-                result = await loop.run_in_executor(pool, lambda: next(gen, None))
-                if result is None:
-                    break
-                i, opus_data = result
                 await websocket.send_bytes(opus_data)
-                logging.info(f"ws_tts: 已发送音频数据 {i}")
-
+                frame_count += 1
+            logging.info(f"[Main] 文本推理完成，发送帧数: {frame_count}")
     except WebSocketDisconnect:
-        logging.info("ws_tts: 连接断开")
+        logging.info("[Main] WebSocket断开")
         await websocket.close()
     except Exception as e:
-        logging.error(f"ws_tts: 异常: {e}")
+        logging.error(f"[Main] 异常: {e}")
         await websocket.send_json({"error": str(e)})
+
+import atexit
+def cleanup():
+    """服务退出时关闭所有 worker 进程"""
+    logging.info("[Main] 服务退出，清理worker进程")
+    for tq in task_queues:
+        tq.put(None)
+    for p in workers:
+        p.join()
+atexit.register(cleanup)
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--port',
-                        type=int,
-                        default=50000)
-    parser.add_argument('--model_dir',
-                        type=str,
-                        default='iic/CosyVoice-300M',
-                        help='local path or modelscope repo id')
+    parser.add_argument('--port', type=int, default=50000)
+    parser.add_argument('--model_dir', type=str, default='iic/CosyVoice-300M')
     args = parser.parse_args()
-    # try:
-    #     cosyvoice = CosyVoice(args.model_dir)
-    # except Exception:
-    #     try:
-    #         cosyvoice = CosyVoice2(args.model_dir)
-    #     except Exception:
-    #         raise TypeError('no valid model_type!')
+    start_workers(args.model_dir)
+    logging.info(f"[Main] 服务启动，监听端口 {args.port}")
     uvicorn.run(app, host="0.0.0.0", port=args.port)
