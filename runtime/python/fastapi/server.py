@@ -5,7 +5,7 @@ import logging
 import multiprocessing
 import asyncio
 import time
-import opuslib
+import subprocess
 import numpy as np
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -27,10 +27,8 @@ app.add_middleware(
     allow_headers=["*"]
 )
 
-# 用 Manager 解决 Queue 跨进程传递问题
 manager = multiprocessing.Manager()
 
-# -------- Worker进程代码 --------
 def tts_worker(model_dir, task_queue, result_queue):
     logging.info(f"[Worker {os.getpid()}] 启动，加载模型中...")
     try:
@@ -47,7 +45,6 @@ def tts_worker(model_dir, task_queue, result_queue):
             break
         text_queue, prompt_speech_16k = task
 
-        # 保留你的流式生成器推理代码
         def text_generator():
             while True:
                 t = text_queue.get()
@@ -58,30 +55,55 @@ def tts_worker(model_dir, task_queue, result_queue):
                 yield t
 
         logging.info("ws_tts: 开始推理循环")
-        encoder = opuslib.Encoder(16000, 1, opuslib.APPLICATION_AUDIO)
-        frame_size = 320  # 20ms帧，16kHz采样率，单声道
-        for i, j in enumerate(local_cosyvoice.inference_zero_shot(
-                text_generator(),
-                "希望你以后能够做的比我还好呦。",
-                prompt_speech_16k,
-                stream=True)):
-            pcm_data = (j['tts_speech'].numpy() * (2 ** 15)).astype(np.int16).tobytes()
-            # 分帧编码
-            for start in range(0, len(pcm_data), frame_size * 2):  # 2字节每采样点
-                frame = pcm_data[start:start + frame_size * 2]
-                if len(frame) < frame_size * 2:
-                    # 填充最后一帧
-                    frame += b'\x00' * (frame_size * 2 - len(frame))
-                opus_data = encoder.encode(frame, frame_size)
-                result_queue.put(opus_data)
+
+        # 启动 ffmpeg 子进程，输入pcm，输出mp3
+        ffmpeg_proc = subprocess.Popen(
+            [
+                "ffmpeg",
+                "-f", "s16le",           # PCM 16bit
+                "-ar", "22050",          # 采样率
+                "-ac", "1",              # 单声道
+                "-i", "pipe:0",          # 输入来自stdin
+                "-f", "mp3",             # 输出格式
+                "-b:a", "64k",           # 比特率
+                "pipe:1"                 # 输出到stdout
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            bufsize=0
+        )
+
+        try:
+            for i, j in enumerate(local_cosyvoice.inference_zero_shot(
+                    text_generator(),
+                    "希望你以后能够做的比我还好呦。",
+                    prompt_speech_16k,
+                    stream=True)):
+                pcm_data = (j['tts_speech'].numpy() * (2 ** 15)).astype(np.int16).tobytes()
+                ffmpeg_proc.stdin.write(pcm_data)
+                ffmpeg_proc.stdin.flush()
+                # 尝试读取 mp3 数据（每次推理后都读一部分）
+                while True:
+                    mp3_chunk = ffmpeg_proc.stdout.read(1024)
+                    if not mp3_chunk:
+                        break
+                    result_queue.put(mp3_chunk)
+            ffmpeg_proc.stdin.close()
+            # 读取剩余mp3数据
+            while True:
+                mp3_chunk = ffmpeg_proc.stdout.read(1024)
+                if not mp3_chunk:
+                    break
+                result_queue.put(mp3_chunk)
+        finally:
+            ffmpeg_proc.terminate()
         logging.info("ws_tts: 推理循环结束")
         result_queue.put(None)
 
-# -------- 进程池管理 --------
 task_queues, result_queues, workers = [], [], []
 def start_workers(model_dir, num_workers=5):
     for idx in range(num_workers):
-        tq, rq = manager.Queue(), manager.Queue()  # 用 manager.Queue()
+        tq, rq = manager.Queue(), manager.Queue()
         p = multiprocessing.Process(target=tts_worker, args=(model_dir, tq, rq))
         p.start()
         task_queues.append(tq)
@@ -90,7 +112,6 @@ def start_workers(model_dir, num_workers=5):
         logging.info(f"[Main] 启动worker进程 {p.pid}")
 
 def get_worker(timeout=10):
-    """等待timeout秒，超时抛异常"""
     start = time.time()
     while True:
         for tq, rq in zip(task_queues, result_queues):
@@ -100,7 +121,6 @@ def get_worker(timeout=10):
             raise RuntimeError("没有空闲worker，请稍后重试")
         time.sleep(0.01)
 
-# -------- WebSocket 路由 --------
 @app.websocket("/ws_tts")
 async def websocket_tts(websocket: WebSocket):
     await websocket.accept()
@@ -110,9 +130,8 @@ async def websocket_tts(websocket: WebSocket):
         with open(prompt_wav_path, "rb") as f:
             prompt_speech_16k = load_wav(f, 16000)
         tq, rq = get_worker()
-        text_queue = manager.Queue()  # 用 manager.Queue()
+        text_queue = manager.Queue()
         tq.put((text_queue, prompt_speech_16k))
-        # 启动异步文本接收任务
         async def receive_texts():
             while True:
                 data = await websocket.receive_json()
@@ -125,12 +144,11 @@ async def websocket_tts(websocket: WebSocket):
                 text_queue.put(tts_text)
                 logging.info("[Main] 文本已放入队列")
         receive_task = asyncio.create_task(receive_texts())
-        # 实时读取 worker 返回的音频帧并发送给前端
         while True:
-            opus_data = await asyncio.get_event_loop().run_in_executor(None, rq.get)
-            if opus_data is None:
+            mp3_data = await asyncio.get_event_loop().run_in_executor(None, rq.get)
+            if mp3_data is None:
                 break
-            await websocket.send_bytes(opus_data)
+            await websocket.send_bytes(mp3_data)
     except WebSocketDisconnect:
         logging.info("[Main] WebSocket断开")
         await websocket.close()

@@ -6,8 +6,8 @@ WORKDIR /opt/CosyVoice
 RUN sed -i s@/archive.ubuntu.com/@/mirrors.aliyun.com/@g /etc/apt/sources.list
 RUN apt-get update -y
 RUN apt-get -y install git unzip git-lfs g++
-RUN apt-get update && apt-get install -y libogg-dev libopus-dev
-RUN pip install opuslib
+RUN apt-get install libopus0
+RUN apt-get update && apt-get install -y ffmpeg
 RUN git lfs install
 RUN git clone --recursive https://github.com/maxgameone/CosyVoice.git
 # here we use python==3.10 because we cannot find an image which have both python3.8 and torch2.0.1-cu118 installed
