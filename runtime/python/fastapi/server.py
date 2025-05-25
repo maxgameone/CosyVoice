@@ -132,6 +132,7 @@ async def websocket_tts(websocket: WebSocket):
         tq, rq = get_worker()
         text_queue = manager.Queue()
         tq.put((text_queue, prompt_speech_16k))
+
         async def receive_texts():
             while True:
                 data = await websocket.receive_json()
@@ -143,12 +144,15 @@ async def websocket_tts(websocket: WebSocket):
                     break
                 text_queue.put(tts_text)
                 logging.info("[Main] 文本已放入队列")
-        receive_task = asyncio.create_task(receive_texts())
-        while True:
-            mp3_data = await asyncio.get_event_loop().run_in_executor(None, rq.get)
-            if mp3_data is None:
-                break
-            await websocket.send_bytes(mp3_data)
+
+        async def send_audio():
+            while True:
+                mp3_data = await asyncio.get_event_loop().run_in_executor(None, rq.get)
+                if mp3_data is None:
+                    break
+                await websocket.send_bytes(mp3_data)
+
+        await asyncio.gather(receive_texts(), send_audio())
     except WebSocketDisconnect:
         logging.info("[Main] WebSocket断开")
         await websocket.close()
