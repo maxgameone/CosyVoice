@@ -4,6 +4,7 @@ import argparse
 import logging
 import multiprocessing
 import asyncio
+import time
 import opuslib
 import numpy as np
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -83,12 +84,16 @@ def start_workers(model_dir, num_workers=5):
         workers.append(p)
         logging.info(f"[Main] 启动worker进程 {p.pid}")
 
-def get_worker():
-    # 简单轮询分配空闲 worker
-    for tq, rq in zip(task_queues, result_queues):
-        if rq.empty():
-            return tq, rq
-    return task_queues[0], result_queues[0]
+def get_worker(timeout=10):
+    """等待timeout秒，超时抛异常"""
+    start = time.time()
+    while True:
+        for tq, rq in zip(task_queues, result_queues):
+            if rq.empty():
+                return tq, rq
+        if time.time() - start > timeout:
+            raise RuntimeError("没有空闲worker，请稍后重试")
+        time.sleep(0.01)
 
 # -------- WebSocket 路由 --------
 @app.websocket("/ws_tts")
