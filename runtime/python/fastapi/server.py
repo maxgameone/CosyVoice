@@ -27,6 +27,9 @@ app.add_middleware(
     allow_headers=["*"]
 )
 
+# 用 Manager 解决 Queue 跨进程传递问题
+manager = multiprocessing.Manager()
+
 # -------- Worker进程代码 --------
 def tts_worker(model_dir, task_queue, result_queue):
     logging.info(f"[Worker {os.getpid()}] 启动，加载模型中...")
@@ -49,7 +52,9 @@ def tts_worker(model_dir, task_queue, result_queue):
             while True:
                 t = text_queue.get()
                 logging.info(f"ws_tts: 生成器取到文本: {t}")
-            
+                if t is None:
+                    logging.info("ws_tts: 生成器收到结束信号，退出")
+                    break
                 yield t
 
         logging.info("ws_tts: 开始推理循环")
@@ -76,7 +81,7 @@ def tts_worker(model_dir, task_queue, result_queue):
 task_queues, result_queues, workers = [], [], []
 def start_workers(model_dir, num_workers=5):
     for idx in range(num_workers):
-        tq, rq = multiprocessing.Queue(), multiprocessing.Queue()
+        tq, rq = manager.Queue(), manager.Queue()  # 用 manager.Queue()
         p = multiprocessing.Process(target=tts_worker, args=(model_dir, tq, rq))
         p.start()
         task_queues.append(tq)
@@ -105,7 +110,7 @@ async def websocket_tts(websocket: WebSocket):
         with open(prompt_wav_path, "rb") as f:
             prompt_speech_16k = load_wav(f, 16000)
         tq, rq = get_worker()
-        text_queue = multiprocessing.Queue()
+        text_queue = manager.Queue()  # 用 manager.Queue()
         tq.put((text_queue, prompt_speech_16k))
         # 启动异步文本接收任务
         async def receive_texts():
